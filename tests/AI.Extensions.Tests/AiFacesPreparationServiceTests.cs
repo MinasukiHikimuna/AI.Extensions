@@ -1094,7 +1094,7 @@ public sealed class AiFacesPreparationServiceTests
                 CoverBoundingBox: new AiBoundingBox(0.31, 0.14, 0.07, 0.16),
                 Metadata: null);
 
-            await using var coverStream = await AiFaceCoverGenerator.CreateAsync("image", preparedFace, coverDetection: null, configuration: null);
+            await using var coverStream = await AiFaceCoverGenerator.CreateAsync("image", preparedFace, coverDetection: null, configuration: null, zipFileReader: null);
 
             Assert.NotNull(coverStream);
 
@@ -1137,7 +1137,7 @@ public sealed class AiFacesPreparationServiceTests
                 CoverBoundingBox: new AiBoundingBox(0.20, 0.20, 0.36, 0.36),
                 Metadata: null);
 
-            await using var coverStream = await AiFaceCoverGenerator.CreateAsync("image", preparedFace, coverDetection: null, configuration: null);
+            await using var coverStream = await AiFaceCoverGenerator.CreateAsync("image", preparedFace, coverDetection: null, configuration: null, zipFileReader: null);
 
             Assert.Null(coverStream);
         }

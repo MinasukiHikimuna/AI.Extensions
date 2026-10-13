@@ -3,6 +3,7 @@ using System.Globalization;
 
 using AI.Extensions.Abstractions;
 
+using Cove.Core.Entities.Galleries.Zip;
 using Cove.Core.Interfaces;
 
 using SixLabors.ImageSharp;
@@ -23,12 +24,15 @@ internal static class AiFaceCoverGenerator
     private const double BlankMeanLumaThreshold = 8.0;
     private const double BlankLumaVarianceThreshold = 12.0;
     private static readonly TimeSpan FrameExtractionTimeout = TimeSpan.FromSeconds(30);
+    private static readonly string[] ArchiveExtensions = [".zip", ".cbz"];
+    private static readonly IZipFileReader DefaultZipFileReader = new ZipFileReader();
 
     public static async Task<MemoryStream?> CreateAsync(
         string hostEntityType,
         AiPreparedFaceIdentity preparedFace,
         AiPreparedDetection? coverDetection,
         CoveConfiguration? configuration,
+        IZipFileReader? zipFileReader,
         CancellationToken ct = default)
     {
         if (preparedFace.CoverBoundingBox is null || string.IsNullOrWhiteSpace(preparedFace.CoverAssetId))
@@ -38,23 +42,72 @@ internal static class AiFaceCoverGenerator
 
         var coverBoundingBox = preparedFace.CoverBoundingBox.Value;
         var assetPath = preparedFace.CoverAssetId.Trim();
-        if (!File.Exists(assetPath))
+        if (File.Exists(assetPath))
         {
-            return null;
+            return hostEntityType switch
+            {
+                "video" when coverDetection?.ObservedAtSeconds is { } seconds => await CreateFromVideoAsync(assetPath, seconds, coverBoundingBox, configuration, ct),
+                "image" => await CreateFromImageAsync(assetPath, coverBoundingBox, ct),
+                _ => null,
+            };
         }
 
-        return hostEntityType switch
+        // A best sample from a zipped gallery is stored as "<archive>.zip/<entry>". It is a still whichever kind of
+        // host this run is for, and the stored box was detected on it, so crop it as an image.
+        if (TryParseArchivePath(assetPath, out var archivePath, out var entryPath))
         {
-            "video" when coverDetection?.ObservedAtSeconds is { } seconds => await CreateFromVideoAsync(assetPath, seconds, coverBoundingBox, configuration, ct),
-            "image" => await CreateFromImageAsync(assetPath, coverBoundingBox, ct),
-            _ => null,
-        };
+            return await CreateFromArchiveEntryAsync(zipFileReader ?? DefaultZipFileReader, archivePath, entryPath, coverBoundingBox, ct);
+        }
+
+        return null;
     }
+
+    // True when CreateAsync can read the cover source: a plain file, or an entry inside an archive that exists.
+    internal static bool SourceExists(string path)
+        => File.Exists(path) || TryParseArchivePath(path, out _, out _);
 
     private static async Task<MemoryStream?> CreateFromImageAsync(string imagePath, AiBoundingBox boundingBox, CancellationToken ct)
     {
         await using var stream = new FileStream(imagePath, FileMode.Open, FileAccess.Read, FileShare.Read, 81920, useAsync: true);
         return await CreateFromStreamAsync(stream, boundingBox, ct);
+    }
+
+    private static async Task<MemoryStream?> CreateFromArchiveEntryAsync(IZipFileReader zipFileReader, string archivePath, string entryPath, AiBoundingBox boundingBox, CancellationToken ct)
+    {
+        try
+        {
+            await using var stream = await zipFileReader.ExtractEntryAsync(archivePath, entryPath, ct);
+            return await CreateFromStreamAsync(stream, boundingBox, ct);
+        }
+        catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException)
+        {
+            return null;
+        }
+    }
+
+    // Mirrors Cove's ThumbnailService.TryParseArchivePath, which resolves the same "<archive>.zip/<entry>" image paths.
+    private static bool TryParseArchivePath(string path, out string archivePath, out string entryPath)
+    {
+        archivePath = string.Empty;
+        entryPath = string.Empty;
+
+        var normalizedPath = path.Replace('\\', '/');
+        foreach (var extension in ArchiveExtensions)
+        {
+            var markerIndex = normalizedPath.IndexOf(extension + "/", StringComparison.OrdinalIgnoreCase);
+            if (markerIndex < 0) continue;
+
+            var archiveEnd = markerIndex + extension.Length;
+            var candidateArchivePath = path[..archiveEnd];
+            var candidateEntryPath = normalizedPath[(archiveEnd + 1)..].Trim('/');
+            if (candidateEntryPath.Length == 0 || !File.Exists(candidateArchivePath)) continue;
+
+            archivePath = candidateArchivePath;
+            entryPath = candidateEntryPath;
+            return true;
+        }
+
+        return false;
     }
 
     private static async Task<MemoryStream?> CreateFromVideoAsync(string videoPath, double seconds, AiBoundingBox boundingBox, CoveConfiguration? configuration, CancellationToken ct)

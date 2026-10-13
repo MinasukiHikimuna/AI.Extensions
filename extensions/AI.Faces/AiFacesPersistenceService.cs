@@ -4,6 +4,7 @@ using System.Text.Json;
 using AI.Extensions.Abstractions;
 
 using Cove.Core.Entities;
+using Cove.Core.Entities.Galleries.Zip;
 using Cove.Core.Interfaces;
 
 using Microsoft.Extensions.DependencyInjection;
@@ -409,6 +410,7 @@ internal sealed class AiFacesPersistenceService(IServiceScopeFactory scopeFactor
         var faceRepo = services.GetRequiredService<IFaceRepository>();
         var customFieldRepo = services.GetRequiredService<ICustomFieldRepository>();
         var configuration = services.GetService<CoveConfiguration>();
+        var zipFileReader = services.GetService<IZipFileReader>();
 
         var face = await faceRepo.GetFaceAsync(item.FaceId, tracking: true, ct);
         if (face is null) return false;
@@ -416,7 +418,7 @@ internal sealed class AiFacesPersistenceService(IServiceScopeFactory scopeFactor
         var currentCoverQuality = await customFieldRepo.FindNumberValueAsync(CustomFieldEntityTypes.Face, face.Id, CoverBlobQualityScoreField, ct);
         if (!ShouldGenerateCover(face, item.IncomingCoverQuality, currentCoverQuality is null ? null : (double?)currentCoverQuality)) return false;
 
-        await using var coverStream = await AiFaceCoverGenerator.CreateAsync(item.HostEntityType, item.CoverFace, item.CoverDetection, configuration, ct);
+        await using var coverStream = await AiFaceCoverGenerator.CreateAsync(item.HostEntityType, item.CoverFace, item.CoverDetection, configuration, zipFileReader, ct);
         if (coverStream is null) return false;
 
         var previousBlobId = face.CoverBlobId;
@@ -512,7 +514,7 @@ internal sealed class AiFacesPersistenceService(IServiceScopeFactory scopeFactor
     {
         if (hostEntityType != "image"
             || string.IsNullOrWhiteSpace(preparedFace.CoverAssetId)
-            || File.Exists(preparedFace.CoverAssetId)
+            || AiFaceCoverGenerator.SourceExists(preparedFace.CoverAssetId)
             || string.IsNullOrWhiteSpace(request.Context.Subject)
             || !File.Exists(request.Context.Subject))
         {

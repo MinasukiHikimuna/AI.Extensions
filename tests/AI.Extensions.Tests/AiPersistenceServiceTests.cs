@@ -638,6 +638,176 @@ public sealed class AiPersistenceServiceTests
     }
 
     [Fact]
+    public async Task PersistFaces_GeneratesVideoRunCoverFromBestSampleInsideZipArchive()
+    {
+        var tempRoot = Path.Combine(Path.GetTempPath(), $"ai-faces-cover-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempRoot);
+
+        try
+        {
+            var archivePath = Path.Combine(tempRoot, "gallery.zip");
+            await CreateZipWithSolidImageAsync(archivePath, "set/017.jpg", new Rgba32(220, 30, 30));
+            var coverAssetId = $"{archivePath}/set/017.jpg";
+
+            await using var provider = CreateProvider(services =>
+            {
+                services.AddSingleton<IBlobService, TestBlobService>();
+                services.AddSingleton(new CoveConfiguration());
+            });
+
+            var service = new AiFacesPersistenceService(provider.GetRequiredService<IServiceScopeFactory>());
+            var request = CreateRequest(AiMediaKinds.Video, Path.Combine(tempRoot, "current.mp4"), "video", 42, "run-face-cover-zip", durationSeconds: 60);
+            var batch = new AiPreparedArtifactBatch();
+
+            batch.Faces.Add(new AiPreparedFaceIdentity(
+                "face-cover-zip",
+                "ext:ai.faces",
+                Label: "Cover Face",
+                IsProvisional: false,
+                QualityScore: 0.97,
+                CoverAssetId: coverAssetId,
+                CoverBoundingBox: new AiBoundingBox(0.25, 0.15, 0.75, 0.85)));
+            batch.Detections.Add(new AiPreparedDetection(
+                request.Context.AssetId,
+                "ext:ai.faces",
+                Class: "face",
+                ObservedAtSeconds: 10.0,
+                Score: 0.9,
+                BoundingBox: new AiBoundingBox(0.1, 0.2, 0.3, 0.4),
+                ModelKey: "scrfd_face",
+                RefKind: "face",
+                RefKey: "face-cover-zip",
+                GroupKey: "track-1"));
+
+            await service.PersistAsync(request, batch);
+
+            await using var scope = provider.CreateAsyncScope();
+            var db = scope.ServiceProvider.GetRequiredService<CoveContext>();
+            var blobService = (TestBlobService)scope.ServiceProvider.GetRequiredService<IBlobService>();
+            var face = await db.Faces.SingleAsync();
+
+            Assert.False(string.IsNullOrWhiteSpace(face.CoverBlobId));
+            AssertCoverIsReddish(blobService.StoredBlobs[face.CoverBlobId!]);
+        }
+        finally
+        {
+            Directory.Delete(tempRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task PersistFaces_KeepsBestSampleInsideZipArchiveForImageRunInsteadOfContextSubject()
+    {
+        var tempRoot = Path.Combine(Path.GetTempPath(), $"ai-faces-cover-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempRoot);
+
+        try
+        {
+            var archivePath = Path.Combine(tempRoot, "gallery.zip");
+            await CreateZipWithSolidImageAsync(archivePath, "017.jpg", new Rgba32(220, 30, 30));
+            var subjectPath = Path.Combine(tempRoot, "current.jpg");
+            using (var image = new Image<Rgba32>(640, 480, new Rgba32(30, 200, 30)))
+            {
+                await image.SaveAsJpegAsync(subjectPath);
+            }
+
+            await using var provider = CreateProvider(services =>
+            {
+                services.AddSingleton<IBlobService, TestBlobService>();
+                services.AddSingleton(new CoveConfiguration());
+            });
+
+            var service = new AiFacesPersistenceService(provider.GetRequiredService<IServiceScopeFactory>());
+            var request = CreateRequest(AiMediaKinds.Image, subjectPath, "image", 17, "run-face-cover-zip-image");
+            var batch = new AiPreparedArtifactBatch();
+
+            batch.Faces.Add(new AiPreparedFaceIdentity(
+                "face-cover-zip",
+                "ext:ai.faces",
+                Label: "Cover Face",
+                IsProvisional: false,
+                QualityScore: 0.97,
+                CoverAssetId: $"{archivePath}/017.jpg",
+                CoverBoundingBox: new AiBoundingBox(0.25, 0.15, 0.75, 0.85)));
+
+            await service.PersistAsync(request, batch);
+
+            await using var scope = provider.CreateAsyncScope();
+            var db = scope.ServiceProvider.GetRequiredService<CoveContext>();
+            var blobService = (TestBlobService)scope.ServiceProvider.GetRequiredService<IBlobService>();
+            var face = await db.Faces.SingleAsync();
+
+            Assert.False(string.IsNullOrWhiteSpace(face.CoverBlobId));
+            AssertCoverIsReddish(blobService.StoredBlobs[face.CoverBlobId!]);
+        }
+        finally
+        {
+            Directory.Delete(tempRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task PersistFaces_SkipsCoverWhenZipArchiveEntryIsMissing()
+    {
+        var tempRoot = Path.Combine(Path.GetTempPath(), $"ai-faces-cover-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempRoot);
+
+        try
+        {
+            var archivePath = Path.Combine(tempRoot, "gallery.zip");
+            await CreateZipWithSolidImageAsync(archivePath, "017.jpg", new Rgba32(220, 30, 30));
+
+            await using var provider = CreateProvider(services =>
+            {
+                services.AddSingleton<IBlobService, TestBlobService>();
+                services.AddSingleton(new CoveConfiguration());
+            });
+
+            var service = new AiFacesPersistenceService(provider.GetRequiredService<IServiceScopeFactory>());
+            var request = CreateRequest(AiMediaKinds.Video, Path.Combine(tempRoot, "current.mp4"), "video", 42, "run-face-cover-zip-missing", durationSeconds: 60);
+            var batch = new AiPreparedArtifactBatch();
+
+            batch.Faces.Add(new AiPreparedFaceIdentity(
+                "face-cover-zip",
+                "ext:ai.faces",
+                Label: "Cover Face",
+                IsProvisional: false,
+                QualityScore: 0.97,
+                CoverAssetId: $"{archivePath}/missing.jpg",
+                CoverBoundingBox: new AiBoundingBox(0.25, 0.15, 0.75, 0.85)));
+
+            await service.PersistAsync(request, batch);
+
+            await using var scope = provider.CreateAsyncScope();
+            var db = scope.ServiceProvider.GetRequiredService<CoveContext>();
+            var face = await db.Faces.SingleAsync();
+
+            Assert.Null(face.CoverBlobId);
+        }
+        finally
+        {
+            Directory.Delete(tempRoot, recursive: true);
+        }
+    }
+
+    private static async Task CreateZipWithSolidImageAsync(string archivePath, string entryPath, Rgba32 color)
+    {
+        await using var file = File.Create(archivePath);
+        using var archive = new System.IO.Compression.ZipArchive(file, System.IO.Compression.ZipArchiveMode.Create, leaveOpen: false);
+        var entry = archive.CreateEntry(entryPath);
+        await using var entryStream = entry.Open();
+        using var image = new Image<Rgba32>(640, 480, color);
+        await image.SaveAsJpegAsync(entryStream);
+    }
+
+    private static void AssertCoverIsReddish(byte[] coverBytes)
+    {
+        using var cover = SixLabors.ImageSharp.Image.Load<Rgba32>(coverBytes);
+        var pixel = cover[cover.Width / 2, cover.Height / 2];
+        Assert.True(pixel.R > 180 && pixel.G < 80 && pixel.B < 80, $"Expected the cover to come from the archived sample, got RGB({pixel.R}, {pixel.G}, {pixel.B}).");
+    }
+
+    [Fact]
     public async Task PersistFaces_ReplacesFaceCoverWhenNewSampleIsBetter()
     {
         var tempRoot = Path.Combine(Path.GetTempPath(), $"ai-faces-cover-{Guid.NewGuid():N}");
