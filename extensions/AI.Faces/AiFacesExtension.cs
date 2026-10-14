@@ -108,7 +108,7 @@ public sealed class AiFacesExtension : FullExtensionBase, IPermissionContributor
             BackfillCoversJobId,
             "Build missing AI face covers",
             RunCoverBackfillAsync,
-            "Builds a cover for every face without one from its stored best sample, without re-running AI. Faces whose best sample is a video frame are skipped.",
+            "Builds a cover for every face without one from its stored best sample, without re-running AI. A video frame stored before AI Faces recorded frame times is skipped until an AI run of that face records one.",
             supportsParameters: false,
             showInTaskList: true);
 
@@ -280,6 +280,7 @@ public sealed class AiFacesExtension : FullExtensionBase, IPermissionContributor
             entity.Property(item => item.CoverY1).HasColumnName("cover_y1");
             entity.Property(item => item.CoverX2).HasColumnName("cover_x2");
             entity.Property(item => item.CoverY2).HasColumnName("cover_y2");
+            entity.Property(item => item.CoverObservedAtSeconds).HasColumnName("cover_observed_at_seconds");
             entity.Property(item => item.CoverQualityScore).HasColumnName("cover_quality_score");
             entity.Property(item => item.ObservationCount).HasColumnName("observation_count");
             entity.Property(item => item.AssetIdsJson).HasColumnName("asset_ids_json");
@@ -347,6 +348,12 @@ public sealed class AiFacesExtension : FullExtensionBase, IPermissionContributor
                 vector vector NOT NULL
             );
             CREATE INDEX IF NOT EXISTS ix_ext_ai_faces_identity_anchor_identity_id ON ext_ai_faces_identity_anchor (identity_id);
+            """);
+
+        // When the cover sample is a video frame, its time in that video, so the frame can be found again. Identities
+        // stored before this column existed keep null until a run records a new best sample or sees the stored one.
+        Migration("002_add_identity_cover_time", """
+            ALTER TABLE ext_ai_faces_identity ADD COLUMN IF NOT EXISTS cover_observed_at_seconds double precision NULL;
             """);
     }
 

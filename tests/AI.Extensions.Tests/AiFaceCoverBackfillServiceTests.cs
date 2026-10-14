@@ -42,7 +42,7 @@ public sealed class AiFaceCoverBackfillServiceTests
             }
 
             await using var provider = CreateProvider();
-            int archivedId, imageId, videoId, missingId, noSampleId, coveredId, mergedId, foreignId;
+            int archivedId, imageId, videoId, missingId, missingVideoId, noSampleId, coveredId, mergedId, foreignId;
             await using (var scope = provider.CreateAsyncScope())
             {
                 var db = scope.ServiceProvider.GetRequiredService<CoveContext>();
@@ -50,10 +50,11 @@ public sealed class AiFaceCoverBackfillServiceTests
                 var still = new Face { Label = "still", PrimarySourceKey = "face-0002" };
                 var video = new Face { Label = "video", PrimarySourceKey = "face-0003" };
                 var missing = new Face { Label = "missing", PrimarySourceKey = "face-0004" };
+                var missingVideo = new Face { Label = "missing video", PrimarySourceKey = "face-0008" };
                 var noSample = new Face { Label = "no sample", PrimarySourceKey = "face-0005" };
                 var covered = new Face { Label = "covered", PrimarySourceKey = "face-0006", CoverBlobId = "existing-blob" };
                 var foreign = new Face { Label = "other provider", PrimarySourceKey = "other-0001" };
-                db.Faces.AddRange(archived, still, video, missing, noSample, covered, foreign);
+                db.Faces.AddRange(archived, still, video, missing, missingVideo, noSample, covered, foreign);
                 await db.SaveChangesAsync();
 
                 var merged = new Face { Label = "merged", PrimarySourceKey = "face-0007", MergedIntoFaceId = archived.Id };
@@ -65,11 +66,12 @@ public sealed class AiFaceCoverBackfillServiceTests
                     Identity(4, "face-0004", Path.Combine(tempRoot, "gone.jpg")),
                     Identity(5, "face-0005", null),
                     Identity(6, "face-0006", imagePath),
-                    Identity(7, "face-0007", imagePath));
+                    Identity(7, "face-0007", imagePath),
+                    Identity(8, "face-0008", Path.Combine(tempRoot, "gone.mp4"), coverSeconds: 12.5));
                 await db.SaveChangesAsync();
 
-                (archivedId, imageId, videoId, missingId, noSampleId, coveredId, mergedId, foreignId)
-                    = (archived.Id, still.Id, video.Id, missing.Id, noSample.Id, covered.Id, merged.Id, foreign.Id);
+                (archivedId, imageId, videoId, missingId, missingVideoId, noSampleId, coveredId, mergedId, foreignId)
+                    = (archived.Id, still.Id, video.Id, missing.Id, missingVideo.Id, noSample.Id, covered.Id, merged.Id, foreign.Id);
             }
 
             var service = provider.GetRequiredService<AiFaceCoverBackfillService>();
@@ -77,11 +79,11 @@ public sealed class AiFaceCoverBackfillServiceTests
             var result = await service.BackfillAsync(progress);
 
             Assert.Equal(new AiFaceCoverBackfillResult(
-                FacesWithoutCover: 5,
+                FacesWithoutCover: 6,
                 CreatedCoverCount: 2,
                 NotCreatedCount: 0,
-                SkippedVideoSampleCount: 1,
-                SkippedMissingSourceCount: 1,
+                SkippedVideoWithoutTimestampCount: 1,
+                SkippedMissingSourceCount: 2,
                 SkippedNoSampleCount: 1), result);
             Assert.Equal(result.Summary, progress.Messages[^1]);
 
@@ -95,6 +97,7 @@ public sealed class AiFaceCoverBackfillServiceTests
                 AssertCoverColor(blobs, faces[imageId], expectRed: false);
                 Assert.Null(faces[videoId].CoverBlobId);
                 Assert.Null(faces[missingId].CoverBlobId);
+                Assert.Null(faces[missingVideoId].CoverBlobId);
                 Assert.Null(faces[noSampleId].CoverBlobId);
                 Assert.Equal("existing-blob", faces[coveredId].CoverBlobId);
                 Assert.Null(faces[mergedId].CoverBlobId);
@@ -110,7 +113,7 @@ public sealed class AiFaceCoverBackfillServiceTests
             }
 
             var rerun = await service.BackfillAsync(progress: null);
-            Assert.Equal(3, rerun.FacesWithoutCover);
+            Assert.Equal(4, rerun.FacesWithoutCover);
             Assert.Equal(0, rerun.CreatedCoverCount);
         }
         finally
@@ -128,12 +131,58 @@ public sealed class AiFaceCoverBackfillServiceTests
         Assert.False(job.SupportsParameters);
     }
 
-    private static ExtAiFacesIdentityEntity Identity(int ordinal, string faceKey, string? coverAssetId)
+    [FfmpegFact]
+    public async Task BackfillAsync_BuildsCoversFromVideoSamplesWithAStoredTimestamp()
+    {
+        var tempRoot = Path.Combine(Path.GetTempPath(), $"ai-faces-cover-backfill-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempRoot);
+
+        try
+        {
+            var videoPath = Path.Combine(tempRoot, "clip.mp4");
+            TestVideos.CreateTwoColorVideo(videoPath, new Rgba32(220, 30, 30), new Rgba32(30, 200, 30), switchAtSeconds: 2, totalSeconds: 4);
+
+            await using var provider = CreateProvider();
+            int lateId, earlyId;
+            await using (var scope = provider.CreateAsyncScope())
+            {
+                var db = scope.ServiceProvider.GetRequiredService<CoveContext>();
+                var late = new Face { Label = "late", PrimarySourceKey = "face-0001" };
+                var early = new Face { Label = "early", PrimarySourceKey = "face-0002" };
+                db.Faces.AddRange(late, early);
+                db.Set<ExtAiFacesIdentityEntity>().AddRange(
+                    Identity(1, "face-0001", videoPath, coverSeconds: 3.0),
+                    Identity(2, "face-0002", videoPath, coverSeconds: 0.5));
+                await db.SaveChangesAsync();
+                (lateId, earlyId) = (late.Id, early.Id);
+            }
+
+            var result = await provider.GetRequiredService<AiFaceCoverBackfillService>().BackfillAsync(progress: null);
+
+            Assert.Equal(2, result.CreatedCoverCount);
+            Assert.Equal(0, result.SkippedVideoWithoutTimestampCount);
+            await using (var scope = provider.CreateAsyncScope())
+            {
+                var db = scope.ServiceProvider.GetRequiredService<CoveContext>();
+                var blobs = (TestBlobService)scope.ServiceProvider.GetRequiredService<IBlobService>();
+                var faces = await db.Faces.AsNoTracking().ToDictionaryAsync(face => face.Id);
+                AssertCoverColor(blobs, faces[lateId], expectRed: false);
+                AssertCoverColor(blobs, faces[earlyId], expectRed: true);
+            }
+        }
+        finally
+        {
+            Directory.Delete(tempRoot, recursive: true);
+        }
+    }
+
+    private static ExtAiFacesIdentityEntity Identity(int ordinal, string faceKey, string? coverAssetId, double? coverSeconds = null)
         => new()
         {
             FaceKey = faceKey,
             Ordinal = ordinal,
             CoverAssetId = coverAssetId,
+            CoverObservedAtSeconds = coverSeconds,
             CoverX1 = coverAssetId is null ? null : 0.25,
             CoverY1 = coverAssetId is null ? null : 0.15,
             CoverX2 = coverAssetId is null ? null : 0.75,

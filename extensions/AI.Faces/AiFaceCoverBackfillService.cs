@@ -15,26 +15,27 @@ internal sealed record AiFaceCoverBackfillResult(
     int FacesWithoutCover,
     int CreatedCoverCount,
     int NotCreatedCount,
-    int SkippedVideoSampleCount,
+    int SkippedVideoWithoutTimestampCount,
     int SkippedMissingSourceCount,
     int SkippedNoSampleCount)
 {
     public string Summary
         => $"Created {CreatedCoverCount} of {FacesWithoutCover} missing face cover(s). "
            + $"Not created (unreadable source, blank crop, error, or covered meanwhile): {NotCreatedCount}. "
-           + $"Skipped: {SkippedVideoSampleCount} with a video best sample, {SkippedMissingSourceCount} whose source file is missing, "
+           + $"Skipped: {SkippedVideoWithoutTimestampCount} whose best sample is a video frame without a stored time, {SkippedMissingSourceCount} whose source file is missing, "
            + $"{SkippedNoSampleCount} without a stored best sample.";
 }
 
 /// <summary>
-/// Builds covers for faces that have none, from each face's stored best sample (the identity's cover asset and
-/// box), without re-running any model. Covers are otherwise only queued while persisting an AI run, and a normal
-/// run skips reusable results before that point, so faces whose earlier cover attempt failed never get another.
+/// Builds covers for faces that have none, from each face's stored best sample (the identity's cover asset, box and,
+/// for a video frame, its time), without re-running any model. Covers are otherwise only queued while persisting an
+/// AI run, and a normal run skips reusable results before that point, so faces whose earlier cover attempt failed
+/// never get another.
 /// </summary>
 internal sealed class AiFaceCoverBackfillService(IServiceScopeFactory scopeFactory)
 {
-    private const string FaceSourceKey = "ext:ai.faces";
-    // Cover crops decode full-resolution stills; bound the parallelism so a large backfill can't exhaust memory.
+    // Cover crops decode full-resolution stills or video frames; bound the parallelism so a large backfill can't
+    // exhaust memory.
     private const int MaxParallelCovers = 4;
     private const int ProgressInterval = 25;
 
@@ -60,8 +61,9 @@ internal sealed class AiFaceCoverBackfillService(IServiceScopeFactory scopeFacto
             }
 
             assetId = assetId.Trim();
-            // A video best sample can't be re-cropped: the identity stores its file and box but not its timestamp.
-            if (!AiFaceCoverGenerator.IsStillImagePath(assetId))
+            var isStill = AiFaceCoverGenerator.IsStillImagePath(assetId);
+            // A video frame can be found again only by its time, which identities stored before it was recorded lack.
+            if (!isStill && sample.CoverObservedAtSeconds is null)
             {
                 skippedVideo++;
                 continue;
@@ -74,10 +76,8 @@ internal sealed class AiFaceCoverBackfillService(IServiceScopeFactory scopeFacto
             }
 
             workItems.Add(new FaceCoverWorkItem(
-                "image",
                 candidate.FaceId,
-                new AiPreparedFaceIdentity(candidate.FaceKey, FaceSourceKey, CoverAssetId: assetId, CoverBoundingBox: new AiBoundingBox(x1, y1, x2, y2)),
-                CoverDetection: null,
+                new FaceCoverSource(assetId, new AiBoundingBox(x1, y1, x2, y2), isStill ? null : sample.CoverObservedAtSeconds),
                 IncomingCoverQuality: sample.CoverQualityScore));
         }
 
@@ -160,6 +160,7 @@ internal sealed class AiFaceCoverBackfillService(IServiceScopeFactory scopeFacto
                 identity.CoverY1,
                 identity.CoverX2,
                 identity.CoverY2,
+                identity.CoverObservedAtSeconds,
                 identity.CoverQualityScore))
             .ToListAsync(ct);
         var samplesByKey = samples.ToDictionary(static sample => sample.FaceKey, StringComparer.Ordinal);
@@ -178,6 +179,7 @@ internal sealed class AiFaceCoverBackfillService(IServiceScopeFactory scopeFacto
         double? CoverY1,
         double? CoverX2,
         double? CoverY2,
+        double? CoverObservedAtSeconds,
         double CoverQualityScore);
 
     private sealed record CoverBackfillCandidate(int FaceId, string FaceKey, CoverSample Sample);
