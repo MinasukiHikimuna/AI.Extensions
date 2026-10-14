@@ -25,6 +25,10 @@ internal static class AiFaceCoverGenerator
     private const double BlankLumaVarianceThreshold = 12.0;
     private static readonly TimeSpan FrameExtractionTimeout = TimeSpan.FromSeconds(30);
     private static readonly string[] ArchiveExtensions = [".zip", ".cbz"];
+    private static readonly HashSet<string> StillImageExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tif", ".tiff",
+    };
     private static readonly IZipFileReader DefaultZipFileReader = new ZipFileReader();
 
     public static async Task<MemoryStream?> CreateAsync(
@@ -65,6 +69,20 @@ internal static class AiFaceCoverGenerator
     // True when CreateAsync can read the cover source: a plain file, or an entry inside an archive that exists.
     internal static bool SourceExists(string path)
         => File.Exists(path) || TryParseArchivePath(path, out _, out _);
+
+    // True when the path names a still image (a gallery archive entry or an image file) rather than a video, judged
+    // from the path alone so a missing file is still classified.
+    internal static bool IsStillImagePath(string path)
+    {
+        var normalizedPath = path.Replace('\\', '/');
+        foreach (var extension in ArchiveExtensions)
+        {
+            var markerIndex = normalizedPath.IndexOf(extension + "/", StringComparison.OrdinalIgnoreCase);
+            if (markerIndex >= 0 && normalizedPath[(markerIndex + extension.Length + 1)..].Trim('/').Length > 0) return true;
+        }
+
+        return StillImageExtensions.Contains(Path.GetExtension(normalizedPath));
+    }
 
     private static async Task<MemoryStream?> CreateFromImageAsync(string imagePath, AiBoundingBox boundingBox, CancellationToken ct)
     {

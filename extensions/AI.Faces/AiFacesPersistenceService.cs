@@ -427,12 +427,7 @@ internal sealed class AiFacesPersistenceService(IServiceScopeFactory scopeFactor
 
         if (item.IncomingCoverQuality.HasValue)
         {
-            var definition = await customFieldRepo.FindOrCreateDefinitionAsync(new CustomFieldDefinition
-            {
-                Key = CoverBlobQualityScoreField, Label = "AI Faces Cover Quality",
-                Type = CustomFieldTypes.Number, EntityTypes = [CustomFieldEntityTypes.Face],
-                Filterable = false, Sortable = false, DisplayOrder = -1000,
-            }, ct);
+            var definition = await EnsureCoverBlobQualityDefinitionAsync(customFieldRepo, ct);
             await customFieldRepo.UpsertNumberValueAsync(CustomFieldEntityTypes.Face, face.Id, definition.Id, Convert.ToDecimal(item.IncomingCoverQuality.Value, CultureInfo.InvariantCulture), ct);
         }
 
@@ -443,6 +438,14 @@ internal sealed class AiFacesPersistenceService(IServiceScopeFactory scopeFactor
 
         return true;
     }
+
+    internal static Task<CustomFieldDefinition> EnsureCoverBlobQualityDefinitionAsync(ICustomFieldRepository customFieldRepo, CancellationToken ct)
+        => customFieldRepo.FindOrCreateDefinitionAsync(new CustomFieldDefinition
+        {
+            Key = CoverBlobQualityScoreField, Label = "AI Faces Cover Quality",
+            Type = CustomFieldTypes.Number, EntityTypes = [CustomFieldEntityTypes.Face],
+            Filterable = false, Sortable = false, DisplayOrder = -1000,
+        }, ct);
 
     internal static async Task RefreshFaceStatsAsync(IFaceRepository faceRepo, IDetectionRepository detectionRepo, IReadOnlyCollection<int> faceIds, CancellationToken ct)
     {

@@ -23,6 +23,9 @@ public sealed class AiFacesExtension : FullExtensionBase, IPermissionContributor
     public const string UploadReferencePermission = "cove.community.ai.faces.reference.upload";
     public const string DeleteReferencePermission = "cove.community.ai.faces.reference.delete";
     public const string ApplyReferencePermission = "cove.community.ai.faces.reference.apply";
+    public const string BackfillCoversJobId = "backfill-face-covers";
+
+    private IServiceProvider? _services;
 
     // Id, Name, Version, Description, Author, Url, Categories, MinCoveVersion and Dependencies are
     // sourced from extension.json by FullExtensionBase — not duplicated here.
@@ -54,6 +57,7 @@ public sealed class AiFacesExtension : FullExtensionBase, IPermissionContributor
         services.AddSingleton<AiAssetFaceClusterer>();
         services.AddSingleton<AiFaceIdentityReconciler>();
         services.AddSingleton<AiFaceReferenceBackfillService>();
+        services.AddSingleton<AiFaceCoverBackfillService>();
         services.AddSingleton(static services => new AiFacePreparationService(
             services.GetRequiredService<IFaceIdentityStore>(),
             services.GetRequiredService<AiAssetFaceClusterer>(),
@@ -76,6 +80,7 @@ public sealed class AiFacesExtension : FullExtensionBase, IPermissionContributor
 
     public override Task InitializeAsync(IServiceProvider services, CancellationToken ct = default)
     {
+        _services = services;
         PublishContributions<IAiCapabilityContributor>(services);
         // These contracts are consumed by Cove host services (FacesController, AiDataPurgeService),
         // which since the extensions-runtime redesign can only see sibling/extension services through
@@ -95,6 +100,22 @@ public sealed class AiFacesExtension : FullExtensionBase, IPermissionContributor
         services.GetRequiredService<AiFacePresenceSuppressionStore>().Attach(Store);
         services.GetRequiredService<AiFaceIdentityExclusionStore>().Attach(Store);
         return Task.CompletedTask;
+    }
+
+    // Listed under Settings → Operations → Extension Tasks; the host runs it as a cancellable job with progress.
+    protected override void DefineJobs()
+        => Job(
+            BackfillCoversJobId,
+            "Build missing AI face covers",
+            RunCoverBackfillAsync,
+            "Builds a cover for every face without one from its stored best sample, without re-running AI. Faces whose best sample is a video frame are skipped.",
+            supportsParameters: false,
+            showInTaskList: true);
+
+    private async Task RunCoverBackfillAsync(IReadOnlyDictionary<string, string>? parameters, Cove.Plugins.IJobProgress progress, CancellationToken ct)
+    {
+        var services = _services ?? throw new InvalidOperationException("AI Faces is not initialized.");
+        await services.GetRequiredService<AiFaceCoverBackfillService>().BackfillAsync(progress, ct);
     }
 
     public override UIManifest GetUIManifest()
